@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
 
 # ----------------------------
 st.title("Asset Allocation Monte Carlo Dashboard")
@@ -62,14 +63,28 @@ default_corr = pd.DataFrame(
 # ----------------------------
 st.sidebar.header("1️⃣ Portfolio Weights")
 
-def weight_slider(asset):
-    return st.sidebar.slider(f"Weight: {asset}", 0.0, 1.0, 0.2, 0.01)
+weight_inputs = {}
+for asset in assets:
+    weight_inputs[asset] = st.sidebar.number_input(
+        f"Weight %: {asset}",
+        min_value=0.0,
+        max_value=100.0,
+        value=20.0,
+        step=0.5,
+    )
 
-weights = {asset: weight_slider(asset) for asset in assets}
+total_weight_pct = sum(weight_inputs.values())
+st.sidebar.write(f"**Total weight:** {total_weight_pct:.1f}%")
+weights = {a: w / 100 for a, w in weight_inputs.items()}
 total_weight = sum(weights.values())
-st.sidebar.write(f"**Total weight:** {total_weight:.2f}")
 
 leverage = st.sidebar.slider("2️⃣ Leverage factor", 0.0, 3.0, 1.0, 0.05)
+cost_of_leverage = (
+    st.sidebar.number_input(
+        "Cost of leverage (%)", min_value=0.0, max_value=20.0, value=0.0, step=0.1
+    )
+    / 100.0
+)
 
 # Warn if weights don't sum to 1
 if abs(total_weight - 1) > 1e-6:
@@ -107,6 +122,26 @@ for i in range(len(assets)):
     corr_edit.iloc[i, i] = 1.0
     for j in range(i + 1, len(assets)):
         corr_edit.iloc[j, i] = corr_edit.iloc[i, j]
+
+# ----------------------------
+if st.sidebar.button("⚙️ Optimize Weights"):
+    mu_vec = np.array([exp_returns[a] for a in assets])
+    sigma_vec = np.array([volatilities[a] for a in assets])
+    cov = np.outer(sigma_vec, sigma_vec) * corr_edit.values
+
+    def neg_sharpe(w):
+        if w.sum() == 0:
+            return 1e9
+        r = np.dot(w, mu_vec)
+        v = np.sqrt(w.T @ cov @ w)
+        return -(r / v)
+
+    bounds = [(0.0, 1.0)] * len(assets)
+    cons = {"type": "eq", "fun": lambda w: w.sum() - 1}
+    res = minimize(neg_sharpe, np.repeat(1 / len(assets), len(assets)), bounds=bounds, constraints=cons)
+    opt_w = res.x
+    st.sidebar.write("**Optimized Weights (%):**")
+    st.sidebar.write(pd.Series(opt_w * 100, index=assets).round(2))
 
 # ----------------------------
 st.sidebar.header("5️⃣ Simulation Parameters")
@@ -151,7 +186,7 @@ if st.sidebar.button("🚀 Run Simulation"):
     for k in range(n_paths):
         z = np.random.normal(size=(horizon, len(assets)))
         paths = mu_d + z @ chol.T
-        port_daily = paths @ weights_vec
+        port_daily = paths @ weights_vec - (leverage - 1) * cost_of_leverage / trading_days
         cum = np.cumprod(1 + port_daily)
         peak = np.maximum.accumulate(cum)
         dd = (cum - peak) / peak
@@ -197,7 +232,7 @@ if st.sidebar.button("🚀 Run Simulation"):
     example = 0
     z = np.random.normal(size=(horizon, len(assets)))
     path = mu_d + z @ chol.T
-    port_daily = path @ weights_vec
+    port_daily = path @ weights_vec - (leverage - 1) * cost_of_leverage / trading_days
     cum = np.cumprod(1 + port_daily)
     peak = np.maximum.accumulate(cum)
     dd = (cum - peak) / peak
